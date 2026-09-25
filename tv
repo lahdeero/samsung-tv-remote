@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+
+TV_IP="192.168.1.95"
+TV_MAC="B8:B4:09:50:4C:72"
+TOKEN_FILE="$HOME/Projects/tv-remote-controller/.tv-token"
+SAMSUNGTV="$HOME/Projects/tv-remote-controller/.venv/bin/samsungtv"
+
+case "$1" in
+  on)
+    wakeonlan "$TV_MAC"
+    ;;
+  off)
+    "$SAMSUNGTV" \
+      --host "$TV_IP" \
+      --token-file "$TOKEN_FILE" \
+      power
+    ;;
+  *)
+    "$SAMSUNGTV" \
+      --host "$TV_IP" \
+      --token-file "$TOKEN_FILE" \
+      "$@"
+    ;;
+esac
