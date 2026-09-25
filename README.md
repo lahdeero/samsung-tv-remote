@@ -53,3 +53,12 @@ Open http://localhost:3000 (use `-H 0.0.0.0` to reach it from a phone).
 Media controls map to verified `samsungtvws` key codes:
 Play `KEY_PLAY`, Pause `KEY_PAUSE`, Stop `KEY_STOP`, Previous `KEY_REWIND`,
 Next `KEY_FF`. See the samsungtvws `COMMANDS.md` key reference.
+
+## Direct channel and text
+
+- The Channel number field uses `samsungtv channel <n>` (`KEY_0–KEY_9` +
+  `KEY_ENTER`). Channel numbers are validated server-side to `1–9999`.
+- The Text input field uses `samsungtv send-text --end -- <text>`, which sends
+  the text and then ends the IME session (`SendInputEnd`). Text is capped at 200
+  characters and is passed as a single process argument, never interpolated
+  into a shell command.

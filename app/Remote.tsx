@@ -1,6 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react";
+
+import { MAX_CHANNEL, MAX_TEXT_LENGTH, MIN_CHANNEL } from "@/lib/constants";
 
 type TvAction =
   | "powerOn"
@@ -11,6 +20,7 @@ type TvAction =
   | "home"
   | "back"
   | "source"
+  | "guide"
   | "enter"
   | "navUp"
   | "navDown"
@@ -18,6 +28,8 @@ type TvAction =
   | "navRight"
   | "channelUp"
   | "channelDown"
+  | "setChannel"
+  | "sendText"
   | "mediaPlay"
   | "mediaPause"
   | "mediaStop"
@@ -26,11 +38,13 @@ type TvAction =
 
 type Status = { tone: "ok" | "error"; text: string };
 
-async function callTv(action: TvAction): Promise<void> {
+type CommandPayload = { channel?: number; text?: string };
+
+async function callTv(action: TvAction, payload: CommandPayload = {}): Promise<void> {
   const response = await fetch("/api/tv", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action }),
+    body: JSON.stringify({ action, ...payload }),
   });
 
   const data = (await response.json().catch(() => null)) as
@@ -70,9 +84,17 @@ function Key({
   );
 }
 
+function stopEnterPropagation(event: KeyboardEvent<HTMLInputElement>) {
+  if (event.key === "Enter") {
+    event.stopPropagation();
+  }
+}
+
 export default function Remote() {
   const [pending, setPending] = useState(0);
   const [status, setStatus] = useState<Status | null>(null);
+  const [channel, setChannel] = useState("");
+  const [text, setText] = useState("");
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -81,26 +103,71 @@ export default function Remote() {
     };
   }, []);
 
-  const run = useCallback(async (action: TvAction, label: string) => {
-    setPending((count) => count + 1);
-    try {
-      await callTv(action);
-      setStatus({ tone: "ok", text: label });
-    } catch (error) {
-      setStatus({
-        tone: "error",
-        text: error instanceof Error ? error.message : "Command failed",
-      });
-    } finally {
-      setPending((count) => count - 1);
-    }
-
+  const showStatus = useCallback((next: Status) => {
+    setStatus(next);
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setStatus(null), 1800);
   }, []);
 
+  const run = useCallback(
+    async (action: TvAction, label: string, payload?: CommandPayload) => {
+      setPending((count) => count + 1);
+      try {
+        await callTv(action, payload);
+        showStatus({ tone: "ok", text: label });
+      } catch (error) {
+        showStatus({
+          tone: "error",
+          text: error instanceof Error ? error.message : "Command failed",
+        });
+      } finally {
+        setPending((count) => count - 1);
+      }
+    },
+    [showStatus],
+  );
+
   const key = (action: TvAction, label: string) => () => void run(action, label);
   const busy = pending > 0;
+
+  const submitChannel = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const value = channel.trim();
+
+    if (!/^\d+$/.test(value)) {
+      showStatus({ tone: "error", text: "Enter a channel number." });
+      return;
+    }
+
+    const numeric = Number(value);
+    if (numeric < MIN_CHANNEL || numeric > MAX_CHANNEL) {
+      showStatus({
+        tone: "error",
+        text: `Channel must be between ${MIN_CHANNEL} and ${MAX_CHANNEL}.`,
+      });
+      return;
+    }
+
+    void run("setChannel", `Channel ${numeric}`, { channel: numeric });
+  };
+
+  const submitText = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (text.length === 0) {
+      showStatus({ tone: "error", text: "Type some text first." });
+      return;
+    }
+    if (text.length > MAX_TEXT_LENGTH) {
+      showStatus({
+        tone: "error",
+        text: `Text must be ${MAX_TEXT_LENGTH} characters or fewer.`,
+      });
+      return;
+    }
+
+    void run("sendText", "Text sent to TV", { text });
+  };
 
   return (
     <>
@@ -159,6 +226,12 @@ export default function Remote() {
         <div className="grid-2" style={{ marginTop: 12 }}>
           <Key label="Back" sub="Return" onPress={key("back", "Back")} />
           <Key label="Home" onPress={key("home", "Home")} />
+          <Key
+            className="key--wide"
+            label="Guide"
+            variant="ghost"
+            onPress={key("guide", "Guide")}
+          />
         </div>
 
         <p className="section-label">Volume</p>
@@ -176,6 +249,40 @@ export default function Remote() {
           <Key label="CH −" onPress={key("channelDown", "Channel down")} />
           <Key label="CH +" onPress={key("channelUp", "Channel up")} />
         </div>
+        <form className="input-row" style={{ marginTop: 10 }} onSubmit={submitChannel}>
+          <input
+            className="input"
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            placeholder="Channel"
+            aria-label="Channel number"
+            value={channel}
+            onChange={(event) => setChannel(event.target.value.replace(/[^0-9]/g, ""))}
+            onKeyDown={stopEnterPropagation}
+          />
+          <button type="submit" className="key key--go">
+            Go
+          </button>
+        </form>
+
+        <p className="section-label">Text input</p>
+        <form className="input-row" onSubmit={submitText}>
+          <input
+            className="input"
+            type="text"
+            placeholder="Type text for TV…"
+            aria-label="Text to send to the TV"
+            maxLength={MAX_TEXT_LENGTH}
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+            onKeyDown={stopEnterPropagation}
+          />
+          <button type="submit" className="key key--go">
+            Send
+          </button>
+        </form>
+        <p className="hint">Focus a text field on the TV before sending.</p>
 
         <p className="section-label">Playback</p>
         <div className="media">

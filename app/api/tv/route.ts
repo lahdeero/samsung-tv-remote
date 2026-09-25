@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { executeAction, isTvAction } from "@/lib/tv";
+import { executeAction, isTvAction, TvValidationError } from "@/lib/tv";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,18 +13,27 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const action = (body as { action?: unknown } | null)?.action;
-  const key = (body as { key?: unknown } | null)?.key;
+  const payload = (body ?? {}) as {
+    action?: unknown;
+    key?: unknown;
+    channel?: unknown;
+    text?: unknown;
+  };
 
-  if (!isTvAction(action)) {
+  if (!isTvAction(payload.action)) {
     return NextResponse.json({ ok: false, error: "Unknown action" }, { status: 400 });
   }
 
   try {
-    const output = await executeAction(action, typeof key === "string" ? key : undefined);
+    const output = await executeAction(payload.action, {
+      key: payload.key,
+      channel: payload.channel,
+      text: payload.text,
+    });
     return NextResponse.json({ ok: true, output: output.trim() });
   } catch (error) {
     const message = error instanceof Error ? error.message : "TV command failed";
-    return NextResponse.json({ ok: false, error: message }, { status: 500 });
+    const status = error instanceof TvValidationError ? 400 : 500;
+    return NextResponse.json({ ok: false, error: message }, { status });
   }
 }

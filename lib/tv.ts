@@ -3,6 +3,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
+import { MAX_CHANNEL, MAX_TEXT_LENGTH, MIN_CHANNEL } from "./constants";
+
 const execFileAsync = promisify(execFile);
 
 const COMMAND_TIMEOUT_MS = 15_000;
@@ -28,25 +30,59 @@ function getConfig(): TvConfig {
   };
 }
 
+interface ExecError {
+  stderr?: unknown;
+  code?: unknown;
+  killed?: unknown;
+}
+
+/**
+ * Build a clean error from execFile's rejection. Only stderr / exit metadata is
+ * surfaced so command arguments (which may contain user text) are never echoed.
+ */
+function toTvError(error: unknown): Error {
+  if (error && typeof error === "object") {
+    const { stderr, code, killed } = error as ExecError;
+    if (typeof stderr === "string" && stderr.trim()) {
+      return new Error(stderr.trim());
+    }
+    if (code === "ENOENT") {
+      return new Error("samsungtv CLI not found. Check SAMSUNGTV_BIN.");
+    }
+    if (killed) {
+      return new Error("The TV did not respond in time.");
+    }
+  }
+  return new Error("The TV command failed.");
+}
+
 async function runSamsungTv(command: string, commandArgs: string[] = []): Promise<string> {
   const { ip, bin, tokenFile } = getConfig();
-  const { stdout } = await execFileAsync(
-    bin,
-    ["--host", ip, "--token-file", tokenFile, command, ...commandArgs],
-    { timeout: COMMAND_TIMEOUT_MS, maxBuffer: MAX_BUFFER_BYTES },
-  );
-  return stdout;
+  try {
+    const { stdout } = await execFileAsync(
+      bin,
+      ["--host", ip, "--token-file", tokenFile, command, ...commandArgs],
+      { timeout: COMMAND_TIMEOUT_MS, maxBuffer: MAX_BUFFER_BYTES },
+    );
+    return stdout;
+  } catch (error) {
+    throw toTvError(error);
+  }
 }
 
 export type NavigateDirection = "up" | "down" | "left" | "right";
 
 export async function powerOn(): Promise<string> {
   const { mac, wolBin } = getConfig();
-  const { stdout } = await execFileAsync(wolBin, [mac], {
-    timeout: COMMAND_TIMEOUT_MS,
-    maxBuffer: MAX_BUFFER_BYTES,
-  });
-  return stdout;
+  try {
+    const { stdout } = await execFileAsync(wolBin, [mac], {
+      timeout: COMMAND_TIMEOUT_MS,
+      maxBuffer: MAX_BUFFER_BYTES,
+    });
+    return stdout;
+  } catch (error) {
+    throw toTvError(error);
+  }
 }
 
 export const powerOff = () => runSamsungTv("power");
@@ -56,6 +92,7 @@ export const mute = () => runSamsungTv("mute");
 export const home = () => runSamsungTv("home");
 export const back = () => runSamsungTv("back");
 export const source = () => runSamsungTv("source");
+export const guide = () => sendKey("KEY_GUIDE");
 export const enter = () => runSamsungTv("enter");
 export const channelUp = () => runSamsungTv("channel-up");
 export const channelDown = () => runSamsungTv("channel-down");
@@ -137,6 +174,77 @@ export function sendKey(key: string): Promise<string> {
   return runSamsungTv("send-key", [key]);
 }
 
+/** Thrown when untrusted input fails server-side validation. */
+export class TvValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TvValidationError";
+  }
+}
+
+/** Validate a channel number from untrusted input. */
+export function parseChannel(value: unknown): number {
+  const raw =
+    typeof value === "number"
+      ? String(value)
+      : typeof value === "string"
+        ? value.trim()
+        : "";
+
+  if (!/^\d+$/.test(raw)) {
+    throw new TvValidationError("Channel must be a whole number.");
+  }
+
+  const channel = Number(raw);
+  if (channel < MIN_CHANNEL || channel > MAX_CHANNEL) {
+    throw new TvValidationError(
+      `Channel must be between ${MIN_CHANNEL} and ${MAX_CHANNEL}.`,
+    );
+  }
+
+  return channel;
+}
+
+/** Validate text intended for the TV IME. Spaces and punctuation are preserved. */
+export function parseText(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new TvValidationError("Text must be a string.");
+  }
+  if (value.includes("\0")) {
+    throw new TvValidationError("Text contains an unsupported character.");
+  }
+  if (value.length === 0) {
+    throw new TvValidationError("Text is empty.");
+  }
+  if (value.length > MAX_TEXT_LENGTH) {
+    throw new TvValidationError(`Text must be ${MAX_TEXT_LENGTH} characters or fewer.`);
+  }
+  return value;
+}
+
+/** Select a channel by number (KEY_0–KEY_9 + KEY_ENTER). */
+export function setChannel(value: unknown): Promise<string> {
+  const channel = parseChannel(value);
+  return runSamsungTv("channel", [String(channel)]);
+}
+
+/**
+ * Send text to the TV's focused IME field. The CLI's `send-text --end` flag
+ * also emits SendInputEnd (end-text) after the text.
+ */
+export async function sendText(value: unknown, end = true): Promise<string> {
+  const text = parseText(value);
+  const commandArgs = end ? ["--end", "--", text] : ["--", text];
+  try {
+    return await runSamsungTv("send-text", commandArgs);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "unknown error";
+    throw new Error(
+      `Could not send text (${detail}). Make sure a text field is focused on the TV.`,
+    );
+  }
+}
+
 export const TV_ACTIONS = [
   "powerOn",
   "powerOff",
@@ -146,6 +254,7 @@ export const TV_ACTIONS = [
   "home",
   "back",
   "source",
+  "guide",
   "enter",
   "navUp",
   "navDown",
@@ -153,6 +262,8 @@ export const TV_ACTIONS = [
   "navRight",
   "channelUp",
   "channelDown",
+  "setChannel",
+  "sendText",
   "mediaPlay",
   "mediaPause",
   "mediaStop",
@@ -181,7 +292,16 @@ const MEDIA_KEYS: Partial<Record<TvAction, AllowedKey>> = {
   mediaNext: "KEY_FF",
 };
 
-export async function executeAction(action: TvAction, key?: string): Promise<string> {
+export interface TvActionInput {
+  key?: unknown;
+  channel?: unknown;
+  text?: unknown;
+}
+
+export async function executeAction(
+  action: TvAction,
+  input: TvActionInput = {},
+): Promise<string> {
   switch (action) {
     case "powerOn":
       return powerOn();
@@ -199,6 +319,8 @@ export async function executeAction(action: TvAction, key?: string): Promise<str
       return back();
     case "source":
       return source();
+    case "guide":
+      return guide();
     case "enter":
       return enter();
     case "navUp":
@@ -213,11 +335,15 @@ export async function executeAction(action: TvAction, key?: string): Promise<str
       return channelUp();
     case "channelDown":
       return channelDown();
+    case "setChannel":
+      return setChannel(input.channel);
+    case "sendText":
+      return sendText(input.text);
     case "sendKey": {
-      if (!isAllowedKey(key)) {
-        throw new Error("Missing or disallowed key");
+      if (!isAllowedKey(input.key)) {
+        throw new TvValidationError("Missing or disallowed key");
       }
-      return sendKey(key);
+      return sendKey(input.key);
     }
     default: {
       const mediaKey = MEDIA_KEYS[action];
